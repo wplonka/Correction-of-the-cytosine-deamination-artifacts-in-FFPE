@@ -17,8 +17,15 @@ adaptor1_seq <- "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA"
 adaptor2_seq <- "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT"
 organism_name <- "hg38"
 analysis_type <- "TOP"
-read_length <- 150 #or load file with this information
 
+read_length <- 150 #or load file with this information
+read_lengths <- rep(read_length, length(sample_names))
+
+# Construct full paths to input files
+# Adjust the file extensions or naming conventions here if your files
+# use different formats or suffixes.
+tsv_paths <- file.path(tsv_dir, paste0(sample_names, ".tsv"))
+bam_paths <- file.path(bam_dir, paste0(sample_names, ".dedup.recal.mutect2.bam"))
 
 # -----------------------------
 # CREATE OUTPUT DIR IF NEEDED
@@ -39,14 +46,10 @@ if (length(files) == 0) {
 }
 
 # Extract sample names
+# Adjust the file extensions or naming conventions here if your files
+# use different formats or suffixes.
 sample_names <- sub("\\.Mutect2\\.filter\\.pass\\.ffpe\\.vcf$", "", files)
 
-
-# Construct full paths to input files
-tsv_paths <- file.path(tsv_dir, paste0(sample_names, ".tsv"))
-bam_paths <- file.path(bam_dir, paste0(sample_names, ".dedup.recal.mutect2.bam"))
-
-read_lengths <- rep(read_length, length(sample_names))
 
 # -----------------------------
 # BUILD FINAL DATA FRAME
@@ -89,3 +92,4 @@ for (i in seq_len(nrow(to_save))) {
   )
 
 }
+
