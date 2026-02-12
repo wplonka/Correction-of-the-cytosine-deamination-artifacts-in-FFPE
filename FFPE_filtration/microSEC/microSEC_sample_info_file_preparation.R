@@ -19,26 +19,6 @@ organism_name <- "hg38"
 analysis_type <- "TOP"
 
 read_length <- 150 #or load file with this information
-read_lengths <- rep(read_length, length(sample_names))
-
-# Construct full paths to input files
-# Adjust the file extensions or naming conventions here if your files
-# use different formats or suffixes.
-tsv_paths <- file.path(tsv_dir, paste0(sample_names, ".tsv"))
-bam_paths <- file.path(bam_dir, paste0(sample_names, ".dedup.recal.mutect2.bam"))
-
-# -----------------------------
-# OPTION: SPLIT INFO FILES BY CHROMOSOME
-# -----------------------------
-split_by_chromosomes <- TRUE  # Set TRUE to create separate info files for each chromosome
-
-# -----------------------------
-# CREATE OUTPUT DIR IF NEEDED
-# -----------------------------
-
-if (!dir.exists(output_dir)) {
-  dir.create(output_dir, recursive = TRUE)
-}
 
 # -----------------------------
 # GET VCF FILES
@@ -55,6 +35,21 @@ if (length(files) == 0) {
 # use different formats or suffixes.
 sample_names <- sub("\\.Mutect2\\.filter\\.pass\\.ffpe\\.vcf$", "", files)
 
+read_lengths <- rep(read_length, length(sample_names))
+
+# Construct full paths to input files
+# Adjust the file extensions or naming conventions here if your files
+# use different formats or suffixes.
+tsv_paths <- file.path(tsv_dir, paste0(sample_names, ".tsv"))
+bam_paths <- file.path(bam_dir, paste0(sample_names, ".dedup.recal.mutect2.bam"))
+
+# -----------------------------
+# CREATE OUTPUT DIR IF NEEDED
+# -----------------------------
+
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
 
 # -----------------------------
 # BUILD FINAL DATA FRAME
@@ -97,5 +92,6 @@ for (i in seq_len(nrow(to_save))) {
   )
 
 }
+
 
 
