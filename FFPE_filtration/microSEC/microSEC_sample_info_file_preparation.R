@@ -17,7 +17,7 @@ adaptor1_seq <- "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA"
 adaptor2_seq <- "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT"
 organism_name <- "hg38"
 analysis_type <- "TOP"
-read_length <- 150
+read_length <- 150 #or load file with this information
 
 
 # -----------------------------
@@ -87,4 +87,5 @@ for (i in seq_len(nrow(to_save))) {
     sep = "\t",
     quote = FALSE
   )
+
 }
