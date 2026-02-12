@@ -20,6 +20,10 @@ simple_repeat_bed <- "path/to/simpleRepeat.bed"
 # Reference genome
 reference_genome <- Hsapiens
 
+# Option: split info files by chromosome (TRUE/FALSE); 
+# recomended if there is a lot of mutations in vcf file
+split_by_chromosomes <- TRUE
+
 # -----------------------------
 # CREATE OUTPUT DIR IF NEEDED
 # -----------------------------
@@ -116,13 +120,37 @@ for (i in seq_along(vcf_files)) {
     Neighborhood_sequence = final_sequences,
     stringsAsFactors = FALSE
   )
+
+
+  if (split_by_chromosomes) {
+  # Get unique chromosomes
+  chromosomes <- unique(data_to_save$Chr)
   
-  # Write output to file
+  for (chr in chromosomes) {
+    chr_data <- subset(data_to_save, Chr == chr)
+    # Append chromosome number to sample name
+    chr_data$Sample <- paste0(chr_data$Sample, "_", chr)
+    
+    # Write output file for this chromosome
+    output_file <- file.path(output_dir, paste0(sample_names[i], "_", chr, ".tsv"))
+    write.table(
+      chr_data,
+      file = output_file,
+      sep = "\t",
+      row.names = FALSE,
+      quote = FALSE
+    )
+  }
+} else {
+  # Write full data for all chromosomes
+  output_file <- file.path(output_dir, paste0(sample_names[i], ".tsv"))
   write.table(
     data_to_save,
-    file = file.path(output_dir, paste0(sample_names[i], ".tsv")),
+    file = output_file,
     sep = "\t",
     row.names = FALSE,
     quote = FALSE
   )
 }
+}
+
