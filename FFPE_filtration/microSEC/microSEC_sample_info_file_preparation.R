@@ -28,6 +28,11 @@ tsv_paths <- file.path(tsv_dir, paste0(sample_names, ".tsv"))
 bam_paths <- file.path(bam_dir, paste0(sample_names, ".dedup.recal.mutect2.bam"))
 
 # -----------------------------
+# OPTION: SPLIT INFO FILES BY CHROMOSOME
+# -----------------------------
+split_by_chromosomes <- TRUE  # Set TRUE to create separate info files for each chromosome
+
+# -----------------------------
 # CREATE OUTPUT DIR IF NEEDED
 # -----------------------------
 
@@ -92,4 +97,5 @@ for (i in seq_len(nrow(to_save))) {
   )
 
 }
+
 
