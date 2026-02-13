@@ -8,6 +8,13 @@ In case of errors related to incorrect data types in the chromStart and chromEnd
 download_region$chromStart <- as.integer(as.numeric(download_region$chromStart))
 download_region$chromEnd   <- as.integer(as.numeric(download_region$chromEnd))
 
+before:
+   write_tsv(x = download_region,
+              file = paste0(bam_file,".bed"),
+              progress = F,
+              col_names = F)
+
+
 5. (Optional) merge results to one tsv if you worked with chromosomes separetly.
 6. Make a list of vcf and output tsv from MicroSEC files eg. MicroSEC_paired_files.txt
 7. Run microSEC_filtration.sh
