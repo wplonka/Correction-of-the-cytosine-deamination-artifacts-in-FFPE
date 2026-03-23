@@ -1,1 +1,59 @@
+# FFPErase execution script
+
+## Overview
+
+FFPErase is a Nextflow-based pipeline for detecting and correcting FFPE-induced sequencing artifacts in SNVs. Each sample is processed individually, producing annotated VCFs with variants classified as true or artifacts.
+
+---
+
+## Requirements
+
+- Nextflow (≥21.x)  
+- Conda environment with FFPErase and dependencies  
+- `samtools`, `bedtools`  
+- Input: bgzipped VCFs (`.vcf.gz`), BAM files, reference FASTA, BED for capture regions  
+
+---
+
+## Input Table
+
+TSV format (`sample_details.tsv`):
+
+| DATASET | SAMPLE | VCF | BAM | INSERT | COVERAGE |
+
+- **INSERT:** mean insert size per tumor BAM (`samtools stats`)  
+- **COVERAGE:**  
+  - WGS: aligned bases from `samtools stats`  
+  - WES: mean coverage across capture regions (`bedtools coverage`)  
+
+Example:
+```
+DATASET1 Tumor1 /path/Tumor1.vcf.gz /path/Tumor1.bam 350 60
+DATASET1 Tumor2 /path/Tumor2.vcf.gz /path/Tumor2.bam 320 55
+```
+
+---
+
+## SLURM Array Pipeline
+
+- One array task per sample  
+- Temporary work directories are created and removed on success  
+- Outputs stored in `OUTBASE/DATASET/SAMPLE`  
+
+Submit:
+
+```bash
+sbatch ffperase_array.slurm
+```
+
+Adjust array range in script:
+```bash
+#SBATCH --array=1-N  # N = number of samples
+```
+
+
+##  Output
+Annotated VCF per sample: SAMPLE.FFPErase.filtered.vcf
+
+Column snvs_predicts marks artifact status: TRUE = artifact, FALSE = retained
 
