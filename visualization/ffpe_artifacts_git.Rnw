@@ -1,0 +1,1363 @@
+\documentclass{article}
+
+\begin{document}
+\SweaveOpts{concordance=TRUE}
+
+
+
+% ==============================================================================
+% CHUNK 0: Global configuration
+% ------------------------------------------------------------------------------
+% Description : Defines all version numbers, file paths, and shared parameters
+%               used across the entire document. Edit this chunk to update
+%               input/output locations without touching any analysis code.
+% Output      : Variables available in all subsequent chunks via R session
+% ==============================================================================
+<<config, echo=FALSE>>=
+# --- Working directory ---
+PROJECT_ROOT <- '.'   # change to an absolute path if needed
+setwd(PROJECT_ROOT)
+
+# --- Version tags ---
+Version_GlobalVarTab <- 11   # corrected classification of FFPolish and SOBDetector
+Version_Fig2         <- 6
+Version_Fig3         <- 8    # fixed FFPolish
+Version_Fig4         <- 11
+
+# --- Minimum depth of coverage filter used in Figs 3 & 4 ---
+minDP <- 10
+
+# --- Reference / input files ---
+PATH_CancerTypeDict <- 'reference/CancerTypeDict.txt'  # cancer type per TCGA patient ID
+
+# --- Input VCF directories (chunk 2: prepare data from VCF files) ---
+PATH_VCF_POLSL_SEP  <- 'POLSL/SEP'
+PATH_VCF_TCGA_SEP   <- 'TCGA_WES/SEP'
+PATH_VCF_CGCI_SEP   <- 'CGCI_WGS/SEP'
+
+# --- Evaluation input directories (chunk 3: build GlobalVarTab) ---
+Datasets <- list(
+  'FFPE_TCGA_WES' = 'eval_files/merged_TCGA/v4',
+  'FFPE_POLSL_WES' = 'eval_files/merged_LUAD/v4',
+  'FFPE_CGCI_WGS'  = 'eval_files/merged_WGS/v4'
+)
+
+# --- Correction methods and their folder names ---
+Metods <- list(
+  'Uncorrected'         = 'merged_original',
+  'FFPolish'            = 'merged_ffpolish',
+  'ideafix'             = 'merged_ideafix',
+  'microSEC'            = 'merged_microSEC',
+  'SOBdetector'         = 'merged_SOBdetector',
+  'DEEPOMICS FFPE'      = 'merged_deepomics',
+  'DEEPOMICS FFPE plus' = 'merged_deepomics_plus',
+  'FFPErase'            = 'merged_FFPErase'
+)
+
+# --- Output paths ---
+PATH_OUT_POLSL_Sep        <- 'POLSL_CombinedResSep_v2.RDS'
+PATH_OUT_POLSL_Comb       <- 'POLSL_CombinedResComb_v2.RDS'
+PATH_OUT_TCGA_Sep         <- 'TCGA_CombinedResSep_v2.RDS'
+PATH_OUT_TCGA_Comb        <- 'TCGA_CombinedResComb_v2.RDS'
+PATH_OUT_CGCI_Sep         <- 'CGCI_CombinedResSep_v2.RDS'
+PATH_OUT_CGCI_Comb        <- 'CGCI_CombinedResComb_v2.RDS'
+PATH_OUT_GlobalVarTab     <- paste0('eval_files/FFPE_GlobalVarTab_v', Version_GlobalVarTab, '.RDS')
+PATH_OUT_GlobalVarTab_upd <- paste0('eval_files/FFPE_GlobalVarTab_upd_v', Version_GlobalVarTab, '.RDS')
+PATH_OUT_RocTab           <- paste0('eval_files/FFPE_RocTab_v', Version_GlobalVarTab, '-1.RDS')
+PATH_OUT_SupplTab1        <- 'SupplementaryData/Supplementary_Tables_1a.xlsx'
+PATH_OUT_SupplTab2        <- 'SupplementaryData/Supplementary_Tables_2a.xlsx'
+PATH_OUT_SupplTab3        <- 'SupplementaryData/Supplementary_Tables_3a.xlsx'
+
+# --- Shared colour palettes ---
+datasetColors_light <- c('FFPE_CGCI_WGS'='#F9E0DE','FFPE_TCGA_WES'='#E0F4DA','FFPE_POLSL_WES'='#DFEDFA')
+datasetColors_med   <- c('FFPE_CGCI_WGS'='#D94852','FFPE_TCGA_WES'='#5BAD39','FFPE_POLSL_WES'='#3784C7')
+datasetColors_dark  <- c('FFPE_CGCI_WGS'='#9C343B','FFPE_TCGA_WES'='#396D24','FFPE_POLSL_WES'='#255986')
+CosmicColors        <- rev(c('#03BDEF','black','#E42926','#CBCACA','#A2CF63','#ECC7C5'))
+methodColors        <- c('Uncorrected'='gray','ideafix'='#B2DF8A','microSEC'='#33A02C',
+                         'SOBdetector'='#FB9A99','FFPolish'='#FDBF6F',
+                         'DEEPOMICS FFPE'='#A6CEE3','DEEPOMICS FFPE plus'='#1F78B4',
+                         'FFPErase'='#E31A1C')
+methodOrder         <- c('Uncorrected','ideafix','microSEC','SOBdetector',
+                         'FFPolish','DEEPOMICS FFPE','DEEPOMICS FFPE plus','FFPErase')
+
+# --- Shared SNV class definitions ---
+# Used in filter_vcf (chunk 2) and Fig 2 heatmap annotations (chunk 6)
+Comp <- list(
+  'C > A' = c('C/A','G/T'),
+  'C > G' = c('C/G','G/C'),
+  'C > T' = c('C/T','G/A'),
+  'T > A' = c('T/A','A/T'),
+  'T > C' = c('T/C','A/G'),
+  'T > G' = c('T/G','A/C')
+)
+@
+
+
+
+% ==============================================================================
+% CHUNK 1: Load all required libraries and define shared utility functions
+% ------------------------------------------------------------------------------
+% Description : Single centralised library loading block. Also defines
+%               symetricalHeatmap(), a pheatmap wrapper with a symmetric
+%               colour scale.
+% ==============================================================================
+<<libraries, echo=FALSE, message=FALSE, warning=FALSE>>=
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+library(limma)
+library(vcfR)
+library(pheatmap)
+library(openxlsx)
+library(RColorBrewer)
+library(sigminer)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(deconstructSigs)
+
+
+#' Heatmap with a symmetric colour scale
+#'
+#' @param Data         Matrix / data frame to plot
+#' @param scaleCut     Value above/below which the max/min of the colour scale
+#'                     is clamped; data outside this range is shown in the
+#'                     extreme colour
+#' @param colorscheme  RColorBrewer palette name, or 'RdBu2' / 'Jet'
+#' @param cluster_col  Cluster columns (TRUE/FALSE/'sort')
+#' @param cluster_row  Cluster rows (TRUE/FALSE)
+#' @param show_rownames  Show row name labels
+#' @param show_colnames  Show column name labels
+#' @param cutree_rows  Split row dendrogram into N groups (NA = no split)
+#' @param cutree_cols  Split column dendrogram into N groups (NA = no split)
+#' @param annotation_col  data.frame with column annotations
+#' @param annotation_row  data.frame with row annotations
+#' @param annotation_colors  Named list of colour vectors for annotation levels
+#' @param display_numbers  Show values inside heatmap cells
+#' @param fontsize_row  Font size for row labels
+#' @param fontsize_col  Font size for column labels
+#' @param repelRowLabels  FALSE = no repelling; TRUE = repel all row labels;
+#'                        character vector = repel only the named labels
+#' @param scaleSymetry  Apply the symmetric colour scale (the main feature)
+#' @return pheatmap object (also draws to current device)
+symetricalHeatmap <- function(Data, scaleCut = NULL, colorscheme = 'RdYlBu',
+                              cluster_col = FALSE, cluster_row = FALSE,
+                              show_rownames = TRUE, show_colnames = TRUE,
+                              cutree_rows = NA, cutree_cols = NA,
+                              annotation_col = NA, annotation_row = NA,
+                              annotation_colors = NA, display_numbers = FALSE,
+                              fontsize_row = 10, fontsize_col = 10,
+                              repelRowLabels = FALSE, scaleSymetry = TRUE) {
+
+  library('dendsort')
+
+  maxval <- max(abs(Data), na.rm = TRUE)
+
+  if (scaleSymetry) {
+    range    <- c(-scaleCut, scaleCut)
+    maxrange <- c(-maxval,   maxval)
+  } else {
+    range <- maxrange <- c(min(Data), max(Data))
+  }
+
+  bk <- seq(range[1], range[2], scaleCut / 20)
+
+  if (colorscheme == 'RdBu2') {
+    colPalete <- c('#535CA8', 'white', '#E44E4D')
+  } else if (colorscheme == 'Jet') {
+    colPalete <- c('#00007F','blue','#007FFF','cyan','#7FFF7F','yellow','#FF7F00','red','#7F0000')
+  } else if (colorscheme == 'RdBu') {
+    colPalete <- rev(brewer.pal(n = 8, name = 'RdBu'))
+  } else {
+    colPalete <- rev(brewer.pal(n = brewer.pal.info[colorscheme, 'maxcolors'], name = colorscheme))
+  }
+  col <- colorRampPalette(colPalete)(length(bk))
+
+  if (scaleCut < maxval) {
+    bk_min  <- seq(maxrange[1] - 0.01, range[1] - 0.01, 0.01)
+    bk_max  <- seq(range[2]  + 0.01, maxrange[2] + 0.01, 0.01)
+    bk_mod  <- c(bk_min, bk, bk_max)
+    col_mod <- c(rep(col[1],          length(bk_min)),
+                 col,
+                 rep(col[length(col)], length(bk_max)))
+  } else {
+    bk_mod  <- bk
+    col_mod <- col
+  }
+
+  if (cluster_col == 'sort') {
+    mat_cluster_cols <- hclust(dist(t(Data)))
+    sort_hclust      <- function(...) as.hclust(dendsort(as.dendrogram(...)))
+    mat_cluster_cols <- sort_hclust(mat_cluster_cols)
+  } else {
+    mat_cluster_cols <- cluster_col
+  }
+
+  heat <- pheatmap(Data,
+                   cluster_col      = mat_cluster_cols,
+                   cluster_row      = cluster_row,
+                   show_rownames    = show_rownames,
+                   show_colnames    = show_colnames,
+                   breaks           = bk_mod,
+                   color            = col_mod,
+                   cutree_rows      = cutree_rows,
+                   cutree_cols      = cutree_cols,
+                   annotation_col   = annotation_col,
+                   annotation_row   = annotation_row,
+                   annotation_colors = annotation_colors,
+                   display_numbers  = display_numbers,
+                   fontsize_row     = fontsize_row,
+                   fontsize_col     = fontsize_col,
+                   border_color     = 'grey70')
+
+  # Optionally repel row labels to avoid over-plotting
+  if (is.logical(repelRowLabels)) {
+    if (repelRowLabels)
+      add.flag(heat, kept.labels = rownames(Data), repel.degree = 1.5)
+  } else {
+    add.flag(heat, kept.labels = repelRowLabels, repel.degree = 1.5)
+  }
+
+  return(heat)
+}
+@
+
+
+
+% ==============================================================================
+% CHUNK 2: Prepare per-sample genotype data from raw VCF files
+% ------------------------------------------------------------------------------
+% Description : Reads per-sample Mutect2 VCF files for all three cohorts
+%               (POLSL, TCGA, CGCI) in both the separately-called (SEP) and
+%               jointly-called (COMB) configurations.
+%               The filter_vcf() helper:
+%                 - retains only PASS SNVs (REF and ALT length == 1)
+%                 - filters to variants with ALT allele depth > 1
+%                 - maps ChromKey to chromosome names
+%                 - annotates each variant with its SNV substitution class
+%                   (using the global Comp list from chunk 0)
+%                 - adds REF and ALT columns derived from the genotype field
+%               Duplicate genotype field names (rare VCF artefact) are
+%               resolved with make.unique() before tidying.
+%               The resulting CombinedResSep and CombinedResComb objects are
+%               saved as RDS files and used by chunks 6, 7, and 8.
+% Requirements: vcfR (chunk 1); Comp (chunk 0);
+%               VCF files under PATH_VCF_POLSL_SEP, PATH_VCF_TCGA_SEP
+%               PATH_VCF_CGCI_SEP (chunk 0)
+% Output      : POLSL_CombinedResComb_v2.RDS, TCGA_CombinedResComb_v2.RDS
+%               CGCI_CombinedResComb_v2.RDS
+% ==============================================================================
+<<prepare_vcf_data>>=
+# -- Helper: read a vcfR object, filter to PASS SNVs, annotate and return a
+#    tidy data frame with one row per variant per sample --
+filter_vcf <- function(vcf) {
+  # Keep only PASS SNVs
+  vcf_flt  <- vcf[vcfR::getFILTER(vcf) %in% c('PASS', NA) &
+                  nchar(vcfR::getALT(vcf)) == 1 &
+                  nchar(vcfR::getREF(vcf)) == 1]
+
+  # Resolve duplicate genotype field names (rare VCF artefact)
+  dup_names <- names(vcf_flt@gt)[duplicated(names(vcf_flt@gt))]
+  if (length(dup_names) > 0) {
+    cat('Duplicate genotype field names resolved:', dup_names, '\n')
+    names(vcf_flt@gt) <- make.unique(names(vcf_flt@gt))
+  }
+
+  vcf_tidy   <- vcfR2tidy(vcf_flt)
+  mappingTab <- unique(vcf_tidy$fix[, c('ChromKey','CHROM')])
+
+  # Filter to variants with ALT allele depth > 1
+  cov_all     <- as.numeric(strsplit2(vcf_tidy$gt$gt_AD, ',')[, 2])
+  cov_all_flt <- vcf_tidy$gt[cov_all > 1, ]
+
+  # Annotate SNV substitution class using the global Comp list (chunk 0)
+  # gt_GT_alleles_noPhase stores phased genotypes in unphased slash notation
+  cov_all_flt$gt_GT_alleles_noPhase <- gsub('|', '/', cov_all_flt$gt_GT_alleles, fixed = TRUE)
+  for (name in names(Comp)) {
+    cov_all_flt$gt_GT_alleles_noPhase[
+      cov_all_flt$gt_GT_alleles_noPhase %in% Comp[[name]]] <- name
+  }
+  cov_all_flt$gt_GT_alleles_noPhase <- factor(cov_all_flt$gt_GT_alleles_noPhase,
+                                              levels = rev(names(Comp)))
+
+  # Add chromosome name and REF/ALT columns
+  cov_all_flt        <- merge(mappingTab, cov_all_flt, by = 'ChromKey')
+  cov_all_flt$ChromKey <- NULL
+  Nclsplit           <- strsplit2(cov_all_flt$gt_GT_alleles, '/')
+  cov_all_flt$REF    <- Nclsplit[, 1]
+  cov_all_flt$ALT    <- Nclsplit[, 2]
+
+  return(cov_all_flt)
+}
+
+# ---- POLSL cohort (patients Lu06 - Lu10) ----
+
+# Separately called: one VCF per sample per patient
+POLSL_CombinedResSep <- NULL
+for (i in 6:10) {
+  PatientID <- paste0('Lu', sprintf('%02d', i))
+  vcf_comb  <- NULL
+  for (tSample in c('P1','P1_FormalinFixed_NebNext','P1_FormalinFixed_NoEnzyme','P1_UnFixed_NebNext')) {
+    vcf_temp  <- filter_vcf(read.vcfR(paste0(PATH_VCF_POLSL_SEP, '/',
+                                             PatientID, '_', tSample,
+                                             '.Mutect2.filter.pass.phased.ffpe.vcf')))
+    vcf_comb  <- rbind(vcf_comb, vcf_temp)
+  }
+  vcf_comb$PatientID <- PatientID
+  vcf_comb$Indiv     <- gsub(paste0(PatientID, '_'), '', vcf_comb$Indiv)
+  POLSL_CombinedResSep <- rbind(POLSL_CombinedResSep, vcf_comb)
+}
+# Remove normal (germline) sample and standardise sample-name coding
+POLSL_CombinedResSep <- POLSL_CombinedResSep[POLSL_CombinedResSep$Indiv != 'C', ]
+POLSL_CombinedResSep$Indiv[POLSL_CombinedResSep$Indiv == 'P1'] <- 'UnFixed_NoEnzyme'
+POLSL_CombinedResSep$Indiv <- gsub('P1_', '', POLSL_CombinedResSep$Indiv)
+POLSL_CombinedResSep$Indiv <- factor(POLSL_CombinedResSep$Indiv,
+                                     levels = c('UnFixed_NoEnzyme','UnFixed_NebNext',
+                                                'FormalinFixed_NoEnzyme','FormalinFixed_NebNext'))
+POLSL_CombinedResSep$gt_AF <- as.numeric(POLSL_CombinedResSep$gt_AF)
+
+saveRDS(POLSL_CombinedResSep,  PATH_OUT_POLSL_Sep)
+
+
+# ---- TCGA cohort ----
+
+# Separately called
+files      <- list.files(path = PATH_VCF_TCGA_COMB,
+                         pattern = '.Mutect2.filter.pass.ffpe.vcf$')
+PatientIDs <- gsub('.Mutect2.filter.pass.ffpe.vcf', '', files)
+
+TCGA_CombinedResSep <- NULL
+for (PatientID in PatientIDs) {
+  for (tSample in c('TumorFFPE','TumorFrozen')) {
+    vcf_temp           <- filter_vcf(read.vcfR(paste0(PATH_VCF_TCGA_SEP, '/',
+                                                      PatientID, '_', tSample,
+                                                      '.Mutect2.filter.pass.ffpe.vcf')))
+    vcf_temp$Indiv     <- tSample
+    vcf_temp$PatientID <- PatientID
+    TCGA_CombinedResSep <- rbind(TCGA_CombinedResSep, vcf_temp)
+  }
+}
+TCGA_CombinedResSep <- TCGA_CombinedResSep[TCGA_CombinedResSep$Indiv != 'C', ]
+TCGA_CombinedResSep$Type  <- 'Individual'
+TCGA_CombinedResSep$gt_AF <- as.numeric(TCGA_CombinedResSep$gt_AF)
+
+saveRDS(TCGA_CombinedResSep,  PATH_OUT_TCGA_Sep)
+
+# ---- CGCI cohort ----
+
+# Separately called
+files      <- list.files(path = PATH_VCF_CGCI_SEP,
+                         pattern = '_TumorFFPE.Mutect2.filter.pass.vcf$')
+PatientIDs <- gsub('_TumorFFPE.Mutect2.filter.pass.vcf', '', files)
+
+CGCI_CombinedResSep <- NULL
+for (PatientID in PatientIDs) {
+  for (tSample in c('TumorFFPE','TumorFrozen')) {
+    vcf_temp           <- filter_vcf(read.vcfR(paste0(PATH_VCF_CGCI_SEP, '/',
+                                                      PatientID, '_', tSample,
+                                                      '.Mutect2.filter.pass.vcf')))
+    vcf_temp$Indiv     <- tSample
+    vcf_temp$PatientID <- PatientID
+    CGCI_CombinedResSep <- rbind(CGCI_CombinedResSep, vcf_temp)
+  }
+}
+CGCI_CombinedResSep$Type  <- 'Individual'
+CGCI_CombinedResSep$gt_AF <- as.numeric(CGCI_CombinedResSep$gt_AF)
+
+saveRDS(CGCI_CombinedResSep,  PATH_OUT_CGCI_Sep)
+@
+
+
+
+% ==============================================================================
+% CHUNK 3: Build GlobalVarTab - load and merge per-method hap.py TSV files
+% ------------------------------------------------------------------------------
+% Description : Iterates over all datasets and correction methods. Reads per-
+%               sample TSV count files produced by hap.py, normalises sample
+%               IDs, standardises column names, reconstructs missing variant
+%               rows (those filtered out by each method) and assigns labels
+%               (TP1/FP/FN/TN) and wasClassified flags according to each
+%               method's classification behaviour.
+%               NOTE: FFPolish label logic follows v11 (both classified and
+%               unclassified removed variants are mapped to TN/FN).
+% Requirements: Datasets, Metods, PATH_CancerTypeDict (chunk 0);
+%               limma::strsplit2 (chunk 1);
+%               eval_files/<dataset>/<method>/*.tsv present on disk.
+% Output      : eval_files/FFPE_GlobalVarTab_v<Version>.RDS
+% ==============================================================================
+<<build_global_var_tab>>=
+dict <- read.table(PATH_CancerTypeDict, col.names = c('patient','CancerType'))
+
+GlobalVarTab <- data.frame(stringsAsFactors = FALSE)
+
+for (dt in seq_along(Datasets)) {
+  for (mt in seq_along(Metods)) {
+
+    print(paste0(names(Datasets)[dt], ' ', names(Metods)[mt]))
+    files <- list.files(
+      pattern   = '.tsv$',
+      path      = paste0(Datasets[[dt]], '/', Metods[[mt]]),
+      full.names = TRUE
+    )
+
+    # -- Extract sample IDs from filenames --
+    tmpSample <- gsub('.(tsv|vcf)', '', basename(files))
+    tmpSample <- gsub('results_|filtered_|_coverage', '', tmpSample)
+
+    if (names(Datasets)[dt] == 'FFPE_POLSL_WES') {
+      non_normal_idx <- !(grepl('UnFixed', tmpSample) | grepl('FormalinFixed', tmpSample))
+      tmpSample[non_normal_idx] <- gsub('P1_', 'P1_UnFixed_NoEnzyme_', tmpSample[non_normal_idx])
+      tsample <- strsplit2(tmpSample, '_')
+      sample  <- paste0(tsample[,3], '-', tsample[,4])
+      patient <- tsample[,1]
+    } else {
+      tsample <- strsplit2(tmpSample, '_')
+      sample  <- tsample[,2]
+      patient <- tsample[,1]
+    }
+
+    # -- Read and combine all count files for this method/dataset --
+    statTable <- do.call(rbind, lapply(seq_along(files), function(i) {
+      df <- read.table(files[i], header = TRUE, comment.char = '',
+                       stringsAsFactors = FALSE, sep = '\t')
+
+      # Fix for DEEPOMICS FFPE plus on POLSL data (different column format)
+      df$ref.y <- df$alt.y <- NULL
+      colnames(df) <- gsub('.x', '', colnames(df), fixed = TRUE)
+
+      if (ncol(df) == 14) {
+        colnames(df)[13:14] <- c('DP_FFPE', 'DP_FF')
+      } else if (ncol(df) == 13) {
+        colnames(df)[13] <- 'DP_FF'
+        df$DP_FFPE <- NA
+      } else {
+        df$DP_FFPE <- df$DP_FF <- NA
+      }
+
+      # Keep only SNVs
+      df <- df[nchar(df$ref) == 1 & nchar(df$alt) == 1,
+               c('chromosom','pozycja','ref','alt','VAF','DP','ALT_COUNT',
+                 'label','DP_FFPE','DP_FF')]
+      df$sample  <- sample[i]
+      df$patient <- patient[i]
+      df
+    }))
+
+    statTable$Method  <- names(Metods)[mt]
+    statTable$Dataset <- names(Datasets)[dt]
+
+    # -- Annotate cancer types --
+    statTable <- merge(statTable, dict, by = 'patient', all.x = TRUE, all.y = FALSE)
+    statTable$CancerType[statTable$Dataset == 'FFPE_CGCI_WGS']  <- 'BL'
+    statTable$CancerType[statTable$Dataset == 'FFPE_POLSL_WES'] <- 'LUAD'
+
+    # -- Reconstruct variants absent from this method's output --
+    # Variants in Uncorrected but missing here were filtered out; labels are
+    # updated to TN (was FP) or FN (was TP1/FN). wasClassified flags encode
+    # whether the method actually scored the variant.
+    if (names(Metods)[mt] != 'Uncorrected') {
+
+      uncorrectedGlobal <- GlobalVarTab[
+        GlobalVarTab$Method  == 'Uncorrected' &
+        GlobalVarTab$Dataset == names(Datasets)[dt] &
+        GlobalVarTab$label   %in% c('TP1','FP','FN'), ]
+
+      statTable_sub <- statTable[statTable$label %in% c('TP1','FP','FN'), ]
+
+      missing_rows <- anti_join(
+        uncorrectedGlobal, statTable_sub,
+        by = c('patient','chromosom','pozycja','ref','alt','sample')
+      )
+      missing_rows$Method        <- names(Metods)[mt]
+      missing_rows$wasClassified <- TRUE
+
+      if (names(Metods)[mt] == 'FFPolish') {
+        # FFPolish removes both classified artefacts and low-quality unclassified
+        # variants; the threshold below identifies which were truly classified
+        idx_class <- missing_rows$VAF > 0.05 &
+                     missing_rows$DP  > 10    &
+                     missing_rows$ALT_COUNT > 4
+        missing_rows$wasClassified[!idx_class] <- FALSE
+        # Both classified and unclassified removed variants get TN/FN labels (v11)
+        missing_rows$label      <- ifelse(missing_rows$label == 'FP', 'TN', 'FN')
+        statTable$wasClassified <- TRUE
+      }
+
+      if (names(Metods)[mt] %in% c('DEEPOMICS FFPE','DEEPOMICS FFPE plus','microSEC','FFPErase')) {
+        # These methods classify every variant they score; removed = artefact
+        missing_rows$label        <- ifelse(missing_rows$label == 'FP', 'TN', 'FN')
+        missing_rows$wasClassified <- TRUE
+        statTable$wasClassified   <- TRUE
+      }
+
+      if (names(Metods)[mt] == 'ideafix') {
+        # ideafix only classifies C>T and G>A variants with VAF <= 0.3
+        missing_rows$label        <- ifelse(missing_rows$label == 'FP', 'TN', 'FN')
+        missing_rows$wasClassified <- TRUE
+        class_idx <- ((statTable$ref == 'C' & statTable$alt == 'T') |
+                      (statTable$ref == 'G' & statTable$alt == 'A')) &
+                      statTable$VAF <= 0.3
+        statTable$wasClassified <- class_idx
+      }
+
+      if (names(Metods)[mt] == 'SOBdetector') {
+        # SOBdetector classification status is resolved from VCF in chunk 4
+        missing_rows$label        <- ifelse(missing_rows$label == 'FP', 'TN', 'FN')
+        missing_rows$wasClassified <- TRUE
+        statTable$wasClassified   <- NA
+      }
+
+      statTable <- bind_rows(statTable, missing_rows)
+
+    } else {
+      # Uncorrected baseline: classification status undefined
+      statTable$wasClassified <- NA
+    }
+
+    GlobalVarTab <- rbind(GlobalVarTab, statTable)
+  }
+}
+
+# -- Post-processing --
+# Remove variants without a matched fresh-frozen depth measurement
+GlobalVarTab <- GlobalVarTab[!is.na(GlobalVarTab$DP_FF), ]
+# For fresh-frozen control samples there is no separate FFPE depth; copy FF depth
+GlobalVarTab$DP_FFPE[GlobalVarTab$sample %in% c('UnFixed_NoEnzyme','TumorFrozen')] <-
+  GlobalVarTab$DP_FF[GlobalVarTab$sample %in% c('UnFixed_NoEnzyme','TumorFrozen')]
+
+saveRDS(GlobalVarTab, PATH_OUT_GlobalVarTab)
+@
+
+
+
+% ==============================================================================
+% CHUNK 4: Resolve SOBdetector wasClassified from raw VCF files
+% ------------------------------------------------------------------------------
+% Description : Reads per-sample SOBdetector VCF files for all three cohorts
+%               (POLSL, TCGA, CGCI). Extracts the ffpe_filter INFO field to
+%               determine whether each variant was actually scored by the tool
+%               (ffpe_filter == '.' means unclassified). Updates the
+%               wasClassified column in GlobalVarTab for SOBdetector rows and
+%               relabels unclassified removed variants to TN/FN.
+%               Adds wasClassifiedStr (character) column for downstream use.
+%               Note: uses a separate filter_vcf_sobdetector() helper that
+%               only extracts the fields needed for the SOBdetector merge,
+%               keeping it independent from the full filter_vcf() in chunk 2.
+% Requirements: GlobalVarTab (chunk 3, in memory);
+%               vcfR (chunk 1);
+%               VCF files under VariantData/POLSL/SEP/,
+%               VariantData/TCGA_WES/SEP/,
+%               VariantData/CorrectedData/SOBDetector/CGCI/
+% Output      : eval_files/FFPE_GlobalVarTab_upd_v<Version>.RDS
+% ==============================================================================
+<<sobdetector_vcf_classification>>=
+# -- Minimal VCF helper for SOBdetector: extracts ID, Indiv, ffpe_filter only --
+filter_vcf_sobdetector <- function(vcf) {
+  vcf_flt  <- vcf[vcfR::getFILTER(vcf) %in% c('PASS', NA) &
+                  nchar(vcfR::getALT(vcf)) == 1 &
+                  nchar(vcfR::getREF(vcf)) == 1]
+  vcf_tidy <- vcfR2tidy(vcf_flt)
+  colnames(vcf_tidy$fix)[grepl('ffpe_filter', colnames(vcf_tidy$fix))] <- 'ffpe_filter'
+
+  cov_all_flt        <- cbind(vcf_tidy$fix, vcf_tidy$gt)
+  cov_all_flt$ID     <- paste0(cov_all_flt$CHROM, '_', cov_all_flt$POS, '_',
+                               cov_all_flt$REF, '/', cov_all_flt$ALT)
+  cov_all_flt[, c('ID','Indiv','ffpe_filter')]
+}
+
+# -- POLSL cohort (patients Lu06 - Lu10) --
+vars_POLSL <- NULL
+for (i in 6:10) {
+  PatientID <- paste0('Lu', sprintf('%02d', i))
+  vcf_comb  <- NULL
+  for (tSample in c('P1','P1_FormalinFixed_NebNext','P1_FormalinFixed_NoEnzyme','P1_UnFixed_NebNext')) {
+    vcf      <- read.vcfR(paste0('VariantData/POLSL/SEP/', PatientID, '_', tSample,
+                                 '.Mutect2.filter.pass.phased.ffpe.vcf'))
+    vcf@gt   <- vcf@gt[, c('FORMAT', paste0(PatientID, '_', tSample)), drop = FALSE]
+    vcf_comb <- rbind(vcf_comb, filter_vcf_sobdetector(vcf))
+  }
+  vcf_comb$PatientID <- PatientID
+  vcf_comb$Indiv     <- gsub(paste0(PatientID, '_'), '', vcf_comb$Indiv)
+  vars_POLSL         <- rbind(vars_POLSL, vcf_comb)
+}
+vars_POLSL$Indiv[vars_POLSL$Indiv == 'P1'] <- 'UnFixed_NoEnzyme'
+vars_POLSL$Indiv <- gsub('P1_', '', vars_POLSL$Indiv)
+
+# -- TCGA cohort --
+files      <- list.files(path = 'VariantData/TCGA_WES/SEP',
+                         pattern = '.Mutect2.filter.pass.ffpe.vcf$')
+PatientIDs <- unique(strsplit2(gsub('.Mutect2.filter.pass.ffpe.vcf', '', files), '_')[, 1])
+vars_TCGA  <- NULL
+for (PatientID in PatientIDs) {
+  for (tSample in c('TumorFFPE','TumorFrozen')) {
+    vcf           <- read.vcfR(paste0('VariantData/TCGA_WES/SEP/', PatientID, '_', tSample,
+                                      '.Mutect2.filter.pass.ffpe.vcf'))
+    vcf@gt        <- vcf@gt[, c('FORMAT', paste0(PatientID, '_', tSample)), drop = FALSE]
+    vcf_temp      <- filter_vcf_sobdetector(vcf)
+    vcf_temp$Indiv     <- tSample
+    vcf_temp$PatientID <- PatientID
+    vars_TCGA     <- rbind(vars_TCGA, vcf_temp)
+  }
+}
+
+# -- CGCI cohort --
+files      <- list.files(path = 'VariantData/CorrectedData/SOBDetector/CGCI',
+                         pattern = '_TumorFFPE.Mutect2.filter.pass.SOBdetector.vcf$')
+PatientIDs <- gsub('_TumorFFPE.Mutect2.filter.pass.SOBdetector.vcf', '', files)
+vars_CGCI  <- NULL
+for (PatientID in PatientIDs) {
+  for (tSample in c('TumorFFPE','TumorFrozen')) {
+    vcf           <- read.vcfR(paste0('VariantData/CorrectedData/SOBDetector/CGCI/', PatientID,
+                                      '_', tSample, '.Mutect2.filter.pass.SOBdetector.vcf'))
+    vcf@gt        <- vcf@gt[, c('FORMAT', paste0(PatientID, '_', tSample)), drop = FALSE]
+    vcf_temp      <- filter_vcf_sobdetector(vcf)
+    vcf_temp$Indiv     <- tSample
+    vcf_temp$PatientID <- PatientID
+    vars_CGCI     <- rbind(vars_CGCI, vcf_temp)
+  }
+}
+
+# -- Combine all cohorts and standardise sample name separators --
+vars_sobsdetector       <- unique(rbind(vars_POLSL, vars_TCGA, vars_CGCI))
+vars_sobsdetector$Indiv <- gsub('_', '-', vars_sobsdetector$Indiv)
+
+# -- Update SOBdetector rows in GlobalVarTab with per-variant classification status --
+GlobalVarTab_sob    <- GlobalVarTab[GlobalVarTab$Method == 'SOBdetector', ]
+GlobalVarTab_sob$ID <- paste0(GlobalVarTab_sob$chromosom, '_', GlobalVarTab_sob$pozycja,
+                              '_', GlobalVarTab_sob$ref, '/', GlobalVarTab_sob$alt)
+
+GlobalVarTab_sob_ext <- merge(GlobalVarTab_sob, vars_sobsdetector,
+                              by.x = c('ID','patient','sample'),
+                              by.y = c('ID','PatientID','Indiv'),
+                              all.x = TRUE, all.y = FALSE)
+
+# ffpe_filter == '.' means the variant was not scored (unclassified)
+GlobalVarTab_sob_ext$wasClassified <- ifelse(GlobalVarTab_sob_ext$ffpe_filter == '.', FALSE, TRUE)
+GlobalVarTab_sob_ext$wasClassified[is.na(GlobalVarTab_sob_ext$ffpe_filter)] <- TRUE
+
+# Relabel unclassified variants that were removed
+GlobalVarTab_sob_ext[!GlobalVarTab_sob_ext$wasClassified, 'label'] <-
+  ifelse(GlobalVarTab_sob_ext[!GlobalVarTab_sob_ext$wasClassified, 'label'] == 'FP', 'TN', 'FN')
+
+GlobalVarTab_sob_ext$ffpe_filter <- NULL
+GlobalVarTab_sob_ext$ID          <- NULL
+
+# -- Merge updated SOBdetector rows back into the full table --
+GlobalVarTab_upd <- rbind(GlobalVarTab[GlobalVarTab$Method != 'SOBdetector', ],
+                          GlobalVarTab_sob_ext)
+
+# Add string version of wasClassified (needed for label2 in Fig 3)
+GlobalVarTab_upd$wasClassifiedStr <- as.character(GlobalVarTab_upd$wasClassified)
+GlobalVarTab_upd$wasClassifiedStr[is.na(GlobalVarTab_upd$wasClassifiedStr)] <- 'NA'
+
+saveRDS(GlobalVarTab_upd, PATH_OUT_GlobalVarTab_upd)
+@
+
+
+
+% ==============================================================================
+% CHUNK 5: Compute ROC / precision-recall table across depth-of-coverage thresholds
+% ------------------------------------------------------------------------------
+% Description : For every combination of dataset, method, and sample, sweeps
+%               a minimum depth threshold (0-150) over both FFPE and FF depth
+%               columns. Counts TP, FP, FN, TN at each threshold to produce
+%               the precision-recall table used in Fig 3 Panel A.
+% Requirements: GlobalVarTab_upd (chunk 4, in memory);
+%               Datasets, Metods (chunk 0)
+% Output      : eval_files/FFPE_RocTab_v<Version>-1.RDS
+% ==============================================================================
+<<compute_roc_tab>>=
+RocTab_list <- list()
+idx         <- 1
+qual_vals   <- c(seq(0, 9, 1), seq(10, 150, 1))
+
+for (dt in seq_along(Datasets)) {
+  for (mt in seq_along(Metods)) {
+    cat('Processing:', names(Datasets)[dt], names(Metods)[mt], '\n')
+
+    statTable  <- GlobalVarTab_upd[GlobalVarTab_upd$Dataset == names(Datasets)[dt] &
+                                   GlobalVarTab_upd$Method  == names(Metods)[mt], ]
+    AllSamples <- unique(statTable$sample)
+
+    for (n in seq_along(AllSamples)) {
+      sample_data <- statTable[statTable$sample == AllSamples[n], ]
+
+      # Sweep depth thresholds: keep only variants where both FFPE and FF
+      # depths are non-NA and >= threshold
+      kvals_data <- lapply(qual_vals, function(q) {
+        subset_data <- sample_data[
+          sample_data$DP_FFPE >= q & sample_data$DP_FF >= q &
+          !is.na(sample_data$DP_FFPE) & !is.na(sample_data$DP_FF), ]
+
+        data.frame(
+          VAF       = 0, minDP = q,
+          TP        = sum(subset_data$label == 'TP1'),
+          FP        = sum(subset_data$label == 'FP'),
+          FN        = sum(subset_data$label == 'FN'),
+          TN        = sum(subset_data$label == 'TN'),
+          N         = nrow(subset_data),
+          dataset   = names(Datasets)[dt],
+          method    = names(Metods)[mt],
+          sample    = AllSamples[n],
+          patient   = 'ALL',
+          filtering = 'DP',
+          cancer    = NA,
+          stringsAsFactors = FALSE
+        )
+      })
+
+      RocTab_list[[idx]] <- do.call(rbind, kvals_data)
+      idx <- idx + 1
+    }
+  }
+}
+
+RocTab <- do.call(rbind, RocTab_list)
+
+# -- Compute standard classification metrics --
+RocTab$recall      <- RocTab$TP / (RocTab$TP + RocTab$FN)  # sensitivity / TPR
+RocTab$precision   <- RocTab$TP / (RocTab$TP + RocTab$FP)  # PPV
+RocTab$specificity <- RocTab$TN / (RocTab$FP + RocTab$TN)  # TNR
+RocTab$F1          <- 2 * RocTab$recall * RocTab$precision /
+                          (RocTab$recall + RocTab$precision)
+RocTab$dataset     <- factor(RocTab$dataset,
+                             levels = c('FFPE_TCGA_WES','FFPE_CGCI_WGS','FFPE_POLSL_WES'))
+
+saveRDS(RocTab, PATH_OUT_RocTab)
+@
+
+
+
+% ==============================================================================
+% CHUNK 6 (FIG. 2): Mutation frequency distributions and heatmap
+% ------------------------------------------------------------------------------
+% Description : Loads the per-sample genotype data for FFPE and fresh-frozen
+%               samples across all three cohorts. Produces:
+%                 Panel A - stacked VAF histogram (proportion) for FFPE samples
+%                 Panel B - VAF count histogram for FFPE and FF controls
+%                 Panel C - per-patient mutation-type proportion heatmap
+%                           (VAF midpoint bin) with cancer-type annotations
+%               Also exports Supplementary Table 1.
+% Requirements: PATH_OUT_*_Sep RDS files (chunk 2);
+%               PATH_CancerTypeDict, Comp, CosmicColors, datasetColors_* (chunk 0)
+% Output      : ArticleFigures/Fig2-part_*.pdf
+%               SupplementaryData/Supplementary_Tables_1a.xlsx
+% ==============================================================================
+<<fig2_mutation_frequency>>=
+dict <- read.table(PATH_CancerTypeDict, col.names = c('patient','CancerType'))
+
+# -- Load and combine cohort data --
+POLSL_CombinedResSep            <- readRDS(PATH_OUT_POLSL_Sep)
+POLSL_CombinedResSep$Dataset    <- 'FFPE_POLSL_WES'
+POLSL_CombinedResSep$CancerType <- 'LUAD'
+
+TCGA_CombinedResSep             <- readRDS(PATH_OUT_TCGA_Sep)
+TCGA_CombinedResSep$Dataset     <- 'FFPE_TCGA_WES'
+TCGA_CombinedResSep             <- merge(TCGA_CombinedResSep, dict,
+                                         by.x = 'PatientID', by.y = 'patient')
+
+CGCI_CombinedResSep             <- readRDS(PATH_OUT_CGCI_Sep)
+CGCI_CombinedResSep$Dataset     <- 'FFPE_CGCI_WGS'
+CGCI_CombinedResSep$CancerType  <- 'BL'
+
+selCols      <- c('PatientID','CancerType','Indiv','gt_GT_alleles_noPhase','Dataset','gt_AF','gt_DP')
+MutationData <- rbind(POLSL_CombinedResSep[, selCols],
+                      TCGA_CombinedResSep[,  selCols],
+                      CGCI_CombinedResSep[,  selCols])
+colnames(MutationData) <- c('patient','CancerType','sample','var','Dataset','VAF','DP')
+MutationData <- MutationData[!is.na(MutationData$var), ]
+
+# -- Helper: bin VAF values and compute per-group counts and proportions --
+count_variant_frequencies <- function(data, Nbins = 20, group_vars = c('patient')) {
+  bin_edges   <- seq(0, 1, length.out = Nbins + 1)
+  bin_centers <- (bin_edges[-1] + bin_edges[-length(bin_edges)]) / 2
+
+  data %>%
+    mutate(gt_AF_bin = cut(VAF, breaks = bin_edges,
+                           labels = round(bin_centers, 3),
+                           include.lowest = TRUE),
+           gt_AF_bin = as.numeric(as.character(gt_AF_bin))) %>%
+    group_by(across(all_of(c(group_vars, 'gt_AF_bin', 'var')))) %>%
+    summarize(bin_count = n(), .groups = 'drop') %>%
+    group_by(across(all_of(c(group_vars, 'gt_AF_bin')))) %>%
+    mutate(bin_prop = bin_count / sum(bin_count)) %>%
+    ungroup()
+}
+
+# -- Subset to FFPE samples (exclude two outlier TCGA patients) --
+MutationData_sub <- MutationData[
+  MutationData$DP >= 10 &
+  MutationData$sample %in% c('TumorFFPE','FormalinFixed_NoEnzyme') &
+  !MutationData$patient %in% c('TCGA-A6-5665','TCGA-A6-5659'), ]
+
+
+############################ Panel A ############################
+# stacked VAF histogram - proportion (FFPE)  
+
+hist_data_ffpe <- count_variant_frequencies(MutationData_sub, 20, 'Dataset')
+
+p <- ggplot(hist_data_ffpe, aes(x = gt_AF_bin, y = bin_prop, fill = var)) +
+  facet_wrap(~Dataset) +
+  geom_col(position = 'stack') +
+  theme_bw() +
+  scale_fill_manual(values = CosmicColors) +
+  labs(y = 'Proportion of variants', x = 'VAF', fill = 'Variant type') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+ggsave(p, file = 'ArticleFigures/Fig2-part_FFPE_Mutations_HistogramFreq_v2.pdf',
+       width = 7, height = 2.5)
+
+
+############################ Panel B ############################
+# count histogram (FFPE)  
+
+p <- ggplot(hist_data_ffpe, aes(x = gt_AF_bin, y = bin_count/1000, fill = var)) +
+  facet_wrap(~Dataset, scales = 'free_y') +
+  geom_col() +
+  theme_bw() +
+  scale_fill_manual(values = CosmicColors) +
+  labs(y = 'Number of variants /1000', x = 'VAF', fill = 'Variant type') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+ggsave(p, file = 'ArticleFigures/Fig2-part_FFPE_Mutations_HistogramCounts_v2.pdf',
+       width = 7, height = 2.5)
+
+# -- Fresh-frozen control subset --
+MutationData_sub_ctrl <- MutationData[
+  MutationData$DP >= 10 &
+  MutationData$sample %in% c('TumorFrozen','UnFixed_NoEnzyme') &
+  !MutationData$patient %in% c('TCGA-A6-5665','TCGA-A6-5659'), ]
+hist_data_ff <- count_variant_frequencies(MutationData_sub_ctrl, 20, 'Dataset')
+
+# Stacked proportion (FF control)
+p <- ggplot(hist_data_ff, aes(x = gt_AF_bin, y = bin_prop, fill = var)) +
+  facet_wrap(~Dataset) +
+  geom_col(position = 'stack') +
+  theme_bw() +
+  scale_fill_manual(values = CosmicColors) +
+  labs(y = 'Proportion of variants', x = 'VAF', fill = 'Variant type') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+ggsave(p, file = 'ArticleFigures/Fig2-part_FF_Mutations_HistogramFreq_v2.pdf',
+       width = 7, height = 2.5)
+
+# Count histogram (FF control)
+p <- ggplot(hist_data_ff, aes(x = gt_AF_bin, y = bin_count/1000, fill = var)) +
+  facet_wrap(~Dataset, scales = 'free_y') +
+  geom_col() +
+  theme_bw() +
+  scale_fill_manual(values = CosmicColors) +
+  labs(y = 'Number of variants /1000', x = 'VAF', fill = 'Variant type') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+ggsave(p, file = 'ArticleFigures/Fig2-part_FF_Mutations_HistogramCounts_v2.pdf',
+       width = 7, height = 2.5)
+
+
+############################ Panel C ############################
+# per-patient mutation-type proportion heatmap at VAF midpoint
+
+CombinedRes_norm <- count_variant_frequencies(MutationData_sub, 1, 'patient')
+
+heatmap_data <- CombinedRes_norm %>%
+  filter(gt_AF_bin == 0.5) %>%
+  select(patient, var, bin_prop) %>%
+  pivot_wider(names_from = var, values_from = bin_prop)
+
+heatmap_matrix           <- data.frame(heatmap_data, check.names = FALSE)
+rownames(heatmap_matrix) <- heatmap_matrix$patient
+heatmap_matrix$patient   <- NULL
+heatmap_matrix[is.na(heatmap_matrix)] <- 0
+
+row_annotations           <- MutationData_sub %>%
+  select(patient, CancerType, Dataset) %>% distinct()
+rownames(row_annotations) <- row_annotations$patient
+row_annotations$patient   <- NULL
+
+column_annotations        <- data.frame(variant = names(Comp), row.names = names(Comp))
+names(CosmicColors)       <- rev(names(Comp))
+annotation_colors         <- list(variant = CosmicColors, Dataset = datasetColors_med)
+
+pdf('ArticleFigures/Fig2-part_FFPE_Mutations_Heatmap_v2.pdf', width = 6, height = 10)
+  pheatmap(heatmap_matrix, cutree_rows = 5,
+           annotation_row    = row_annotations,
+           annotation_col    = column_annotations,
+           annotation_colors = annotation_colors)
+dev.off()
+
+# -- Supplementary Table 1 --
+hist_data_ffpe$Type <- 'FFPE'
+hist_data_ff$Type   <- 'FF'
+hist_data_all       <- rbind(hist_data_ffpe, hist_data_ff)
+
+heatmap_matrix_annot              <- merge(row_annotations, heatmap_matrix, by.x = 0, by.y = 0)
+colnames(heatmap_matrix_annot)[1] <- 'SampleID'
+
+wb <- createWorkbook()
+addWorksheet(wb, 'Fig2AB', gridLines = TRUE); writeDataTable(wb, 1, hist_data_all)
+addWorksheet(wb, 'Fig2C',  gridLines = TRUE); writeDataTable(wb, 2, heatmap_matrix_annot)
+saveWorkbook(wb, file = PATH_OUT_SupplTab1, overwrite = TRUE)
+@
+
+
+
+% ==============================================================================
+% CHUNK 7 (FIG. 3): Precision-recall curves and variant filtering summary
+% ------------------------------------------------------------------------------
+% Description : Produces:
+%                 Panel A - Precision-recall curves across depth thresholds,
+%                           one facet per dataset/sample, with iso-F1 guides
+%                 Panel B - Cumulative variant count vs. coverage depth (log),
+%                           showing the effect of depth filters
+%                 Panel C - Stacked bar chart of TP/FP/FN/TN counts per method
+%                           normalised by number of patients per dataset
+%               Also exports Supplementary Table 2.
+% Requirements: PATH_OUT_GlobalVarTab_upd, PATH_OUT_RocTab (chunks 4-5);
+%               MutationData (chunk 6, in memory);
+%               methodColors, methodOrder, Version_Fig3 (chunk 0)
+% Output      : ArticleFigures/Fig3-part_*.pdf
+%               ArticleFigures/Fig4-part_FFPE_PRC_DP_*.pdf
+%               SupplementaryData/Supplementary_Tables_2a.xlsx
+% ==============================================================================
+<<fig3_prc_and_filtering>>=
+GlobalVarTab_upd <- readRDS(PATH_OUT_GlobalVarTab_upd)
+RocTab           <- readRDS(PATH_OUT_RocTab)
+
+
+############################ Panel A ############################
+# Precision-recall curves with F1 guide lines 
+
+s      <- seq(0, 1, 0.001)
+Flines <- data.frame()
+for (F in seq(0.1, 1, 0.1)) {
+  p_val  <- (F/2) / (s - (F/2))
+  Flines <- rbind(Flines, data.frame(s, p = p_val, F))
+}
+Flines$rs <- round(Flines$s, 2)
+Flines$rp <- round(Flines$p, 2)
+
+labFlines       <- Flines[Flines$rs == Flines$rp & Flines$F < 1, ]
+labFlines$label <- paste0('F[1]==', labFlines$F)
+labFlines$s     <- labFlines$p <- labFlines$F <- NULL
+labFlines       <- unique(labFlines)
+sFlines         <- Flines[Flines$p > 0 & is.finite(Flines$p) & Flines$p <= 1, ]
+
+prPlot <- ggplot() +
+  geom_line(data = sFlines, aes(s, p, group = F), color = 'gray70') +
+  geom_label(data = labFlines, aes(rs, rp, label = label),
+             parse = TRUE, color = 'gray60', label.size = NA, cex = 2.5)
+
+RocTab_DP       <- unique(RocTab[RocTab$filtering == 'DP' &
+                                 RocTab$sample != 'TumorFrozen' &
+                                 is.na(RocTab$cancer) &
+                                 RocTab$patient == 'ALL', ])
+RocTab_DP       <- RocTab_DP[order(RocTab_DP$minDP), ]
+RocTab_DP_sub   <- RocTab_DP[RocTab_DP$minDP %in% c(0,10,50,100,150), ]
+RocTab_DP10_sub <- RocTab_DP[RocTab_DP$minDP == 10, ]
+
+p <- prPlot +
+  geom_path(data = RocTab_DP, aes(x = recall, y = precision, color = method)) +
+  geom_point(data = RocTab_DP10_sub, aes(x = recall, y = precision, color = method),
+             size = 2, shape = 1) +
+  facet_wrap(~dataset + sample, scales = 'free_y') +
+  theme_bw() + xlab('Sensitivity') + ylab('Precision') +
+  geom_point(data = RocTab_DP_sub, aes(x = recall, y = precision, color = method),
+             size = 0.8) +
+  geom_text_repel(data = RocTab_DP_sub, box.padding = 1,
+                  aes(x = recall, y = precision, color = method, label = minDP),
+                  alpha = 0.5, cex = 2, segment.size = 0.2) +
+  scale_color_manual(values = methodColors)
+ggsave(p, file = paste0('ArticleFigures/Fig4-part_FFPE_PRC_DP_v', Version_Fig3, '-1.pdf'),
+       scale = 2, width = 6, height = 3.2, dpi = 600)
+
+
+############################ Panel B ############################
+# Cumulative variant count vs. depth of coverage 
+
+data_cum <- MutationData %>%
+  filter(!is.na(DP), DP > 0) %>%
+  group_by(sample, Dataset, DP) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  arrange(sample, Dataset, desc(DP)) %>%
+  mutate(grupa = paste0(Dataset, '_', sample)) %>%
+  group_by(sample, Dataset) %>%
+  mutate(cum_count   = cumsum(count),
+         total       = sum(count),
+         cum_percent = cum_count / total)
+
+p <- ggplot(data_cum, aes(x = DP, y = cum_count, color = sample)) +
+  geom_step(direction = 'hv') +
+  facet_wrap(~Dataset, nrow = 3) +
+  theme_bw() +
+  xlab('Depth of coverage (DP)') +
+  ylab('Variants with DP \u2265 x') +
+  scale_x_log10(limits = c(NA, 1000)) +
+  scale_y_log10() +
+  geom_vline(xintercept = c(10, 150), linetype = 'dashed', color = 'red')
+ggsave(p, file = 'ArticleFigures/Fig3-part_VariantCoverageNum_v3.pdf',
+       width = 5, height = 7, device = cairo_pdf)
+
+
+############################ Panel C ############################
+# Variant filtering summary (TP/FP/FN/TN per method, normalised) 
+
+GlobalVarTab_sub <- GlobalVarTab_upd[
+  GlobalVarTab_upd$DP_FFPE >= 10 &
+  GlobalVarTab_upd$DP_FF   >= 10 &
+  GlobalVarTab_upd$sample  %in% c('TumorFFPE','FormalinFixed-NoEnzyme') &
+  GlobalVarTab_upd$label   %in% c('TP1','FP','FN','TN'), ]
+
+GlobalVarTab_sub$label  <- factor(GlobalVarTab_sub$label, levels = c('TN','FN','FP','TP1'))
+GlobalVarTab_sub$Method <- factor(GlobalVarTab_sub$Method, levels = rev(methodOrder))
+
+contColors <- c('lightgray','orange','#E42925','#03BDEE')
+
+SamplesInDataset        <- unique(GlobalVarTab_sub[, c('patient','Dataset')])
+SamplesInDataset_nb     <- table(SamplesInDataset$Dataset)
+SamplesInDataset_nb_vec <- as.vector(SamplesInDataset_nb)
+names(SamplesInDataset_nb_vec) <- names(SamplesInDataset_nb)
+GlobalVarTab_sub$SamplesInDataset_nb <- SamplesInDataset_nb_vec[GlobalVarTab_sub$Dataset]
+
+# label2 marks variants from unclassified removals (used in table but not plotted)
+GlobalVarTab_sub$label2 <- ifelse(
+  GlobalVarTab_sub$wasClassifiedStr == 'FALSE',
+  paste0(GlobalVarTab_sub$label, '_uncl'),
+  as.character(GlobalVarTab_sub$label)
+)
+
+p <- ggplot(GlobalVarTab_sub,
+            aes(x = Method, fill = label, weight = 1 / SamplesInDataset_nb)) +
+  geom_bar() +
+  facet_wrap(~Dataset, scales = 'free_x', ncol = 3) +
+  theme_bw() + coord_flip() +
+  scale_fill_manual(values = contColors) +
+  xlab('Method') + ylab('Number of variants per sample') +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+ggsave(p, file = paste0('ArticleFigures/Fig3-part_FilteringSummary_v', Version_Fig3, 'a.pdf'),
+       scale = 2, width = 4.5, height = 1.7, dpi = 600)
+
+# -- Supplementary Table 2 --
+fig3c_stats <- data.frame(table(GlobalVarTab_sub[, c('Method','label','Dataset')]))
+
+wb <- createWorkbook()
+addWorksheet(wb, 'Fig3A', gridLines = TRUE); writeDataTable(wb, 1, RocTab_DP)
+addWorksheet(wb, 'Fig3B', gridLines = TRUE); writeDataTable(wb, 2, data_cum)
+addWorksheet(wb, 'Fig3C', gridLines = TRUE); writeDataTable(wb, 3, fig3c_stats)
+saveWorkbook(wb, file = PATH_OUT_SupplTab2, overwrite = TRUE)
+@
+
+
+
+% ==============================================================================
+% CHUNK 8 (FIG. 4): Mutational signature analysis
+% ------------------------------------------------------------------------------
+% Description : Computes SBS96 trinucleotide context profiles for all samples
+%               and correction methods using deconstructSigs / BSgenome.
+%               Produces:
+%                 Panel A - Per-method signature difference heatmaps vs.
+%                           fresh-frozen baseline (one PDF per method)
+%                 Panel B - Per-patient SBS96 catalogues for POLSL samples
+%                           (one PDF per patient)
+%                 Panel C - Cosine similarity improvement boxplots (corrected
+%                           vs. uncorrected vs. fresh-frozen), with paired
+%                           Wilcoxon p-values
+%               Also exports Supplementary Table 3.
+% Requirements: PATH_OUT_*_Sep RDS files (chunk 2);
+%               PATH_CancerTypeDict (chunk 0);
+%               symetricalHeatmap() (chunk 1);
+%               eval_files/FFPE_GlobalVarTab_v<Version_Fig4>.RDS (chunk 3);
+%               minDP, methodOrder, Version_Fig4 (chunk 0);
+% Output      : ArticleFigures/Fig4-part_Cosmic_Heatmap_<method>_*.pdf
+%               ArticleFigures/Fig4-part_Cosmic_CorrMethodsSamples_<pat>_*.pdf
+%               ArticleFigures/Fig4-part_Cosmic_CosineSimilarityDiff_*.pdf
+%               SupplementaryData/Supplementary_Tables_3a.xlsx
+% ==============================================================================
+<<fig4_mutation_signatures>>=
+dict <- read.table(PATH_CancerTypeDict, col.names = c('patient','CancerType'))
+
+# -- Load per-sample genotype data (needs CHROM/POS/REF/ALT for trinucleotide context) --
+POLSL_CombinedResSep            <- readRDS(PATH_OUT_POLSL_Sep)
+POLSL_CombinedResSep$Dataset    <- 'FFPE_POLSL_WES'
+POLSL_CombinedResSep$CancerType <- 'LUAD'
+
+TCGA_CombinedResSep             <- readRDS(PATH_OUT_TCGA_Sep)
+TCGA_CombinedResSep$Dataset     <- 'FFPE_TCGA_WES'
+TCGA_CombinedResSep             <- merge(TCGA_CombinedResSep, dict,
+                                         by.x = 'PatientID', by.y = 'patient')
+
+CGCI_CombinedResSep             <- readRDS(PATH_OUT_CGCI_Sep)
+CGCI_CombinedResSep$Dataset     <- 'FFPE_CGCI_WGS'
+CGCI_CombinedResSep$CancerType  <- 'BL'
+
+selCols      <- c('PatientID','CancerType','Indiv','gt_GT_alleles_noPhase',
+                  'Dataset','gt_AF','gt_DP','CHROM','POS','REF','ALT')
+MutationData <- rbind(POLSL_CombinedResSep[, selCols],
+                      TCGA_CombinedResSep[,  selCols],
+                      CGCI_CombinedResSep[,  selCols])
+colnames(MutationData) <- c('patient','CancerType','sample','var','Dataset',
+                            'VAF','DP','CHROM','POS','REF','ALT')
+MutationData <- MutationData[!is.na(MutationData$var), ]
+
+# -- Build SBS96 profiles for the uncorrected fresh-frozen baseline --
+MutationData_sub <- MutationData[
+  MutationData$DP >= minDP &
+  MutationData$sample %in% c('TumorFrozen','UnFixed_NoEnzyme') &
+  nchar(MutationData$REF) == 1 & nchar(MutationData$ALT) == 1, ]
+
+MutationData_sub$patient_sample <- paste0(MutationData_sub$patient, ':',
+                                          MutationData_sub$sample, ':Uncorrected')
+
+sigs.input.uncorrected <- mut.to.sigs.input(
+  mut.ref   = data.frame(MutationData_sub),
+  sample.id = 'patient_sample', chr = 'CHROM', pos = 'POS', ref = 'REF', alt = 'ALT',
+  bsg       = BSgenome.Hsapiens.UCSC.hg38
+)
+rownames(sigs.input.uncorrected) <- gsub('UnFixed_NoEnzyme', 'UnFixed-NoEnzyme',
+                                         rownames(sigs.input.uncorrected))
+
+# -- Build SBS96 profiles for each correction method (TP1 + FP retained calls) --
+GlobalVarTab_upd <- readRDS(paste0('eval_files/FFPE_GlobalVarTab_v', Version_Fig4, '.RDS'))
+
+GlobalVarTab_sub <- GlobalVarTab_upd[
+  GlobalVarTab_upd$DP >= minDP &
+  GlobalVarTab_upd$label %in% c('TP1','FP') &
+  nchar(GlobalVarTab_upd$ref) == 1 & nchar(GlobalVarTab_upd$alt) == 1, ]
+
+GlobalVarTab_sub$patient_sample_method <- paste0(GlobalVarTab_sub$patient, ':',
+                                                  GlobalVarTab_sub$sample, ':',
+                                                  GlobalVarTab_sub$Method)
+
+sigs.input.corrected <- mut.to.sigs.input(
+  mut.ref   = GlobalVarTab_sub,
+  sample.id = 'patient_sample_method',
+  chr = 'chromosom', pos = 'pozycja', ref = 'ref', alt = 'alt',
+  bsg = BSgenome.Hsapiens.UCSC.hg38
+)
+
+# -- Combine and row-normalise --
+sigs.input      <- rbind(sigs.input.uncorrected, sigs.input.corrected)
+norm.sigs.input <- t(apply(sigs.input, 1, function(x) x / sum(x)))
+
+annotTab           = rownames(norm.sigs.input)
+annotTab           = cbind(annotTab, strsplit2(annotTab, ':'))
+colnames(annotTab) = c('Label','PatientID','Sample','Method')
+annotTab           = data.frame(annotTab)
+annotTab$Dataset   = ifelse(grepl('BLGSP', annotTab[,1]), 'CGCI - BL (WGS)',
+                      ifelse(grepl('TCGA',  annotTab[,1]), 'TCGA - Pan cancer (WES)',
+                                                           'SUT - LUAD (WES)'))
+
+# -- Cosine similarity helper --
+cosine_similarity <- function(a, b) {
+  sum(a * b) / (sqrt(sum(a^2)) * sqrt(sum(b^2)))
+}
+
+# -- Fresh-frozen baseline profiles (one row per patient) --
+annotTab_sub           <- annotTab[(annotTab$Sample == 'TumorFrozen' |
+                                    annotTab$Sample == 'UnFixed-NoEnzyme') &
+                                   annotTab$Method == 'Uncorrected', ]
+UncorrFrozen           <- norm.sigs.input[annotTab_sub$Label, ]
+rownames(UncorrFrozen) <- annotTab_sub$PatientID
+
+Methods            <- unique(annotTab$Method)
+cosine_results_all <- data.frame(PatientID = character(), Method = character(),
+                                 CosineSimilarity = numeric(), stringsAsFactors = FALSE)
+
+
+############################ Panel A ############################
+# Panel A: per-method signature difference heatmaps 
+
+for (method in Methods) {
+  annotTab_sub          = annotTab[(annotTab$Sample == 'TumorFFPE' |
+                                     annotTab$Sample == 'FormalinFixed-NoEnzyme') &
+                                    annotTab$Method == method, ]
+  CorrFFPE              = norm.sigs.input[annotTab_sub$Label, ]
+  rownames(CorrFFPE)    = annotTab_sub$PatientID
+
+  SharedPatients <- intersect(rownames(CorrFFPE), rownames(UncorrFrozen))
+  cosine_vals    <- sapply(SharedPatients, function(id) {
+    cosine_similarity(CorrFFPE[id,], UncorrFrozen[id,])
+  })
+
+  cosine_results_all = rbind(cosine_results_all,
+                              data.frame(PatientID        = SharedPatients,
+                                         Method           = method,
+                                         CosineSimilarity = cosine_vals,
+                                         stringsAsFactors = FALSE))
+
+  sigs.input.diff = CorrFFPE - UncorrFrozen
+
+  pdf(paste0('ArticleFigures/Fig4-part_Cosmic_Heatmap_', method, '_DP', minDP, '_v3.pdf'),
+      width = 8, height = 7)
+    symetricalHeatmap(sigs.input.diff, scaleCut = 0.1, colorscheme = 'RdBu2',
+                      cluster_col = FALSE, cluster_row = FALSE,
+                      show_rownames = TRUE, show_colnames = TRUE,
+                      cutree_rows = NA, cutree_cols = NA,
+                      annotation_col = NA, annotation_row = NA, annotation_colors = NA,
+                      display_numbers = FALSE, fontsize_row = 10, fontsize_col = 10,
+                      repelRowLabels = FALSE, scaleSymetry = TRUE)
+  dev.off()
+}
+
+
+############################ Panel B ############################
+# Per-patient SBS96 catalogues (POLSL patients) 
+
+for (i in 6:10) {
+  PatientID     <- paste0('Lu', sprintf('%02d', i))
+  SelSamplesExt <- paste0(PatientID, c(
+    ':UnFixed-NoEnzyme:Uncorrected',          ':FormalinFixed-NoEnzyme:Uncorrected',
+    ':FormalinFixed-NoEnzyme:ideafix',        ':FormalinFixed-NoEnzyme:microSEC',
+    ':FormalinFixed-NoEnzyme:SOBdetector',    ':FormalinFixed-NoEnzyme:FFPolish',
+    ':FormalinFixed-NoEnzyme:DEEPOMICS FFPE', ':FormalinFixed-NoEnzyme:DEEPOMICS FFPE plus',
+    ':FormalinFixed-NoEnzyme:FFPErase',       ':FormalinFixed-NebNext:Uncorrected',
+    ':UnFixed-NebNext:Uncorrected'
+  ))
+
+  pdf(paste0('ArticleFigures/Fig4-part_Cosmic_CorrMethodsSamples_',
+             PatientID, '_DP', minDP, '_v3.pdf'), width = 12, height = 12)
+    print(show_catalogue(t(sigs.input), style = 'cosmic',
+                         samples = unique(SelSamplesExt), x_label_angle = 90))
+  dev.off()
+}
+
+
+############################ Panel C ############################
+# cosine similarity improvement boxplot 
+
+cosine_results_all$Dataset <- ifelse(grepl('TCGA',  cosine_results_all$PatientID),
+                                     'TCGA - Pan cancer (WES)',
+                              ifelse(grepl('BLGSP', cosine_results_all$PatientID),
+                                     'CGCI - BL (WGS)',
+                              ifelse(grepl('^Lu',   cosine_results_all$PatientID),
+                                     'SUT - LUAD (WES)', 'Other')))
+
+datasets <- unique(cosine_results_all$Dataset)
+methods  <- setdiff(unique(cosine_results_all$Method), 'Uncorrected')
+
+# Paired Wilcoxon tests: each method vs. Uncorrected within each dataset
+pvals_df <- data.frame(Dataset = character(), Method = character(),
+                       pval = numeric(), stringsAsFactors = FALSE)
+for (ds in datasets) {
+  for (m in methods) {
+    subset_wide <- cosine_results_all %>%
+      filter(Dataset == ds & Method %in% c('Uncorrected', m)) %>%
+      select(PatientID, Method, CosineSimilarity) %>%
+      tidyr::pivot_wider(names_from = Method, values_from = CosineSimilarity)
+    if (!all(c('Uncorrected', m) %in% colnames(subset_wide))) next
+    p_val <- tryCatch(
+      wilcox.test(subset_wide[[m]], subset_wide$Uncorrected, paired = TRUE)$p.value,
+      error = function(e) NA
+    )
+    pvals_df <- rbind(pvals_df, data.frame(Dataset = ds, Method = m, pval = p_val))
+  }
+}
+pvals_df$pval_label <- ifelse(is.na(pvals_df$pval), 'NA',
+                              sprintf('p = %.3g', pvals_df$pval))
+
+cosine_results_all$Method <- factor(cosine_results_all$Method, levels = rev(methodOrder))
+
+# Compute per-patient delta cosine (corrected - uncorrected)
+cosine_diff <- cosine_results_all %>%
+  select(PatientID, Dataset, Method, CosineSimilarity) %>%
+  pivot_wider(names_from = Method, values_from = CosineSimilarity)
+
+baseline <- cosine_diff$Uncorrected
+
+diff_df <- cosine_diff %>%
+  mutate(across(-c(PatientID, Dataset, Uncorrected),
+                ~ .x - baseline, .names = 'diff_{col}')) %>%
+  select(PatientID, Dataset, starts_with('diff_')) %>%
+  pivot_longer(cols = starts_with('diff_'), names_to = 'Method',
+               values_to = 'DeltaCosine') %>%
+  mutate(Method = gsub('diff_', '', Method)) %>%
+  filter(Method != 'Uncorrected')
+
+# One-sample Wilcoxon test: is the median delta > 0?
+pvals_diff <- diff_df %>%
+  group_by(Dataset, Method) %>%
+  summarise(
+    pval = tryCatch(wilcox.test(DeltaCosine, mu = 0)$p.value, error = function(e) NA),
+    .groups = 'drop'
+  )
+pvals_diff$pval_label <- ifelse(is.na(pvals_diff$pval), 'NA',
+                                sprintf('p = %.3g', pvals_diff$pval))
+
+diff_df$Method <- factor(diff_df$Method,
+                         levels = rev(setdiff(methodOrder, 'Uncorrected')))
+
+p_diff <- ggplot(diff_df, aes(x = Method, y = DeltaCosine)) +
+  geom_boxplot(width = 0.4, outlier.shape = NA, fill = '#03BDEE') +
+  geom_hline(yintercept = 0, linetype = 'dashed', color = 'red') +
+  facet_wrap(~Dataset, ncol = 3) +
+  theme_bw(base_size = 14) +
+  scale_y_continuous(limits = c(-0.3, 0.3)) +
+  labs(x = 'Method', y = 'Cosine similarity: Corrected - Uncorrected') +
+  coord_flip() +
+  geom_text(data = pvals_df,
+            aes(x = Method, y = -0.2, label = pval_label),
+            vjust = 0.5, size = 4, fontface = 'italic', inherit.aes = FALSE)
+
+ggsave(p_diff,
+       file = paste0('ArticleFigures/Fig4-part_Cosmic_CosineSimilarityDiff_v',
+                     Version_Fig4, '_DP', minDP, '_v3a.pdf'),
+       width = 8, height = 4, device = cairo_pdf)
+
+# -- Supplementary Table 3 --
+sigs.input.diff.df <- data.frame(SampleID = rownames(sigs.input.diff),
+                                 sigs.input.diff, check.names = FALSE)
+sigs.input.df      <- data.frame(SampleID = rownames(sigs.input),
+                                 sigs.input, check.names = FALSE)
+
+wb <- createWorkbook()
+addWorksheet(wb, 'Fig4A',  gridLines = TRUE); writeDataTable(wb, 1, sigs.input.diff.df)
+addWorksheet(wb, 'Fig4B',  gridLines = TRUE); writeDataTable(wb, 2, sigs.input.df)
+addWorksheet(wb, 'Fig4C1', gridLines = TRUE); writeDataTable(wb, 3, diff_df)
+addWorksheet(wb, 'Fig4C2', gridLines = TRUE); writeDataTable(wb, 4, pvals_df)
+saveWorkbook(wb, file = PATH_OUT_SupplTab3, overwrite = TRUE)
+@
+
+
+
+% ==============================================================================
+% CHUNK 9 : Session Information
+% ==============================================================================
+<<>>=
+# R version 4.5.1 (2025-06-13 ucrt)
+# Platform: x86_64-w64-mingw32/x64
+# Running under: Windows 11 x64 (build 26200)
+# 
+# Matrix products: default
+#   LAPACK version 3.12.1
+# 
+# locale:
+# [1] LC_COLLATE=Polish_Poland.utf8  LC_CTYPE=Polish_Poland.utf8    LC_MONETARY=Polish_Poland.utf8 LC_NUMERIC=C                   LC_TIME=Polish_Poland.utf8    
+# 
+# time zone: Europe/Warsaw
+# tzcode source: internal
+# 
+# attached base packages:
+# [1] stats4    stats     graphics  grDevices utils     datasets  methods   base     
+# 
+# other attached packages:
+#  [1] deconstructSigs_1.9.0             BSgenome.Hsapiens.UCSC.hg38_1.4.5 BSgenome_1.76.0                   rtracklayer_1.68.0                BiocIO_1.18.0                     Biostrings_2.76.0                
+#  [7] XVector_0.48.0                    GenomicRanges_1.60.0              GenomeInfoDb_1.44.2               IRanges_2.42.0                    S4Vectors_0.46.0                  sigminer_2.3.1                   
+# [13] Biobase_2.68.0                    BiocGenerics_0.54.0               generics_0.1.4                    RColorBrewer_1.1-3                openxlsx_4.2.8                    pheatmap_1.0.13                  
+# [19] vcfR_1.15.0                       limma_3.64.3                      ggrepel_0.9.6                     lubridate_1.9.4                   forcats_1.0.0                     stringr_1.5.1                    
+# [25] purrr_1.1.0                       readr_2.1.5                       tibble_3.3.0                      ggplot2_3.5.2                     tidyverse_2.0.0                   tidyr_1.3.1                      
+# [31] dplyr_1.1.4                      
+# 
+# loaded via a namespace (and not attached):
+#  [1] bitops_1.0-9                permute_0.9-8               rlang_1.1.6                 magrittr_2.0.3              gridBase_0.4-7              furrr_0.3.1                 matrixStats_1.5.0          
+#  [8] compiler_4.5.1              mgcv_1.9-3                  vctrs_0.6.5                 reshape2_1.4.4              pkgconfig_2.0.3             crayon_1.5.3                fastmap_1.2.0              
+# [15] Rsamtools_2.24.0            rmarkdown_2.29              tzdb_0.5.0                  UCSC.utils_1.4.0            xfun_0.53                   jsonlite_2.0.0              DelayedArray_0.34.1        
+# [22] BiocParallel_1.42.1         parallel_4.5.1              cluster_2.1.8.1             R6_2.6.1                    stringi_1.8.7               parallelly_1.45.1           SummarizedExperiment_1.38.1
+# [29] Rcpp_1.1.0                  iterators_1.0.14            knitr_1.50                  Matrix_1.7-3                splines_4.5.1               timechange_0.3.0            tidyselect_1.2.1           
+# [36] abind_1.4-8                 rstudioapi_0.17.1           yaml_2.3.10                 vegan_2.7-1                 doParallel_1.0.17           codetools_0.2-20            curl_7.0.0                 
+# [43] listenv_0.9.1               lattice_0.22-7              plyr_1.8.9                  withr_3.0.2                 evaluate_1.0.5              pinfsc50_1.3.0              future_1.67.0              
+# [50] zip_2.3.3                   pillar_1.11.0               BiocManager_1.30.26         MatrixGenerics_1.20.0       rngtools_1.5.2              foreach_1.5.2               RCurl_1.98-1.17            
+# [57] hms_1.1.3                   scales_1.4.0                NMF_0.28                    globals_0.18.0              glue_1.8.0                  tools_4.5.1                 data.table_1.17.8          
+# [64] GenomicAlignments_1.44.0    registry_0.5-1              XML_3.99-0.19               grid_4.5.1                  ape_5.8-1                   colorspace_2.1-1            nlme_3.1-168               
+# [71] GenomeInfoDbData_1.2.14     restfulr_0.0.16             cli_3.6.5                   S4Arrays_1.8.1              viridisLite_0.4.2           gtable_0.3.6                digest_0.6.37              
+# [78] SparseArray_1.8.1           rjson_0.2.23                farver_2.1.2                htmltools_0.5.8.1           lifecycle_1.0.4             httr_1.4.7                  statmod_1.5.0              
+# [85] MASS_7.3-65                
+@
+
+
+
+\end{document}
