@@ -5,7 +5,7 @@
 # This script:
 # 1. Loops over FFPErase TSV files
 # 2. Matches corresponding VCF files
-# 3. Filters variants according to TSV "True" labels
+# 3. Filters variants according to TSV "False" labels
 # 4. Saves filtered VCFs and a summary table
 # ============================================================
 
@@ -61,7 +61,7 @@ do
     # Prepare keep list
     keep_file="$OUT_FOLDER/$base.keep"
     awk -F'\t' -v strip_chr="$STRIP_CHR_PREFIX" '
-    NR>1 && $NF=="True" {
+    NR>1 && $NF=="False" {
         chr=$1
         if(strip_chr=="true") sub(/^chr/,"",chr)
         print chr"\t"$2"\t"$4"\t"$5
