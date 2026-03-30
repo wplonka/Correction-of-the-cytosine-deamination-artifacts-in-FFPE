@@ -1,3 +1,7 @@
+## microSEC filtration pipeline
+
+
+## Overview
 1. Run microSEC_mutation_info_file_preparation.R
 2. Run microSEC_sample_info_file_preparation.R (If you are working with chromosomes separetly edit this code)
 3. Make a list of info sample files and save eg. info_files_list.txt
