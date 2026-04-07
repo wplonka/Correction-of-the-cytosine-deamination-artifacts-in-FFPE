@@ -1,5 +1,5 @@
 ## microSEC filtration pipeline
-
+This folder contains a collection of scripts for preparing input data, running microSEC, and filtering sequencing artifacts from somatic variant calls.
 
 ## Overview
 1. Run microSEC_mutation_info_file_preparation.R
@@ -23,3 +23,31 @@ before:
 6. Make a list of vcf and output tsv from MicroSEC files eg. MicroSEC_paired_files.txt
 7. Run microSEC_filtration.sh
 
+## Requirements
+- R (≥4.1 recommended)
+- samtools
+
+## Required R packages
+- VariantAnnotation
+- openxlsx
+- BSgenome.Hsapiens.UCSC.hg38 # Or your reference genome
+- GenomicRanges
+- rtracklayer
+- stringr
+- dplyr
+- Biostrings
+- GenomicAlignments
+- Rsamtools
+- remotes
+- GenomeInfoDb
+
+## Input
+- VCF files
+- BAM files
+- reference genome FASTA
+- simple repead BED
+- read lengths
+- adapter sequences
+
+## Output
+- Filtered VCF files
