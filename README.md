@@ -29,6 +29,7 @@ The codebase consists of scripts written in:
 
 
 ⚙️ **Dependencies**
+
 R packages
 - VariantAnnotation
 - openxlsx
