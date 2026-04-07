@@ -28,9 +28,48 @@ The codebase consists of scripts written in:
 - Bash
 
 
-⚙️ **Requirements**  ????
+⚙️ **Dependencies**
+R packages
+- VariantAnnotation
+- openxlsx
+- ideafix
+- dplyr
+- tidyr
+- purrr
+- tibble
+- BSgenome.Hsapiens.UCSC.hg38 # Or your reference genome
+- GenomicRanges
+- rtracklayer
+- stringr
+- Biostrings
+- GenomicAlignments
+- Rsamtools
+- remotes
+- GenomeInfoDb
+- ggplot2
+- tidyverse
+- data.table
+- ComplexHeatmap
+- pROC
+- gridExtra
+- reshape2
+- MutationalPatterns
+- sigminer
+- deconstructSigs
+- microSEC.R file
 
+Command-line Tools
+- bcftools
+- samtools
+- GATK — Genome Analysis Toolkit
+- bwa
+- Nextflow (≥21.x)
 
+ Python & Scripts
+- hap.py
+  
+Bash Utilities
+- Standard Bash commands: awk, sed, head, tail, zcat, mkdir, sort, etc.
 
 📄 **Data availability**
 
