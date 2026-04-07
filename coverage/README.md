@@ -5,7 +5,7 @@ This folder provides a two-step pipeline for extracting genomic coverage from BA
 ## Overview
 This pipeline consists of two main components:
  - coverage.sh - 
-This step processes merged TSV files (derived from VCFs) and computes per-sample coverage using bedtools.
+This step processes merged TSV files (see folder *evaluation*) and computes per-sample coverage using bedtools.
  - coverage_merge.R - 
 This step merges coverage data back into variant tables and optionally generates QC plots.
 
