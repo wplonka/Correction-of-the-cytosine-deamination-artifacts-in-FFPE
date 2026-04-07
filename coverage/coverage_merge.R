@@ -43,8 +43,8 @@ for(file in merged_files){
   cov_files <- coverage_files[grepl(substr(sub("^results_", "", sub("_FFpolish_labeled.tsv","",file)),1,12), coverage_files)] #edit here
   
   # Add BED coordinates
-  merged$start <- merged$pozycja - 1
-  merged$end   <- merged$pozycja - 1 + nchar(merged$ref)
+  merged$start <- merged$position - 1
+  merged$end   <- merged$position - 1 + nchar(merged$ref)
   
   # Merge coverage columns
   if(length(cov_files) > 0){
