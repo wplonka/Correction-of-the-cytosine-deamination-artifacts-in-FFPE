@@ -40,6 +40,7 @@ echo -e "Sample\tVariants_before\tVariants_after\tTSV_True\tTSV_False" > "$SUMMA
 for tsv in "$FFPErase_FOLDER"/*.classified_df_snvs.tsv
 do
     base=$(basename "$tsv" .classified_df_snvs.tsv)
+    base=${base%.FFPErase}
     echo "Processing $base ..." | tee -a "$LOG"
 
     # Find matching VCF
@@ -76,7 +77,7 @@ do
 
     # Filter VCF
     filtered_vcf="$OUT_FOLDER/${base}_FFPErase_filtered.vcf"
-    awk -v keep="$keep_file" -v '
+    awk -v keep="$keep_file" -v strip_chr="$STRIP_CHR_PREFIX" '
     BEGIN{
         FS=OFS="\t"
         while((getline<keep)>0){
